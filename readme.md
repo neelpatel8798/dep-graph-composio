@@ -1,49 +1,93 @@
-# build a tool dependency graph (60-120 mins)
+# Tool Dependency Graph — Composio (Google Super + GitHub)
 
-we care about the quality and structure of the dependency relationships you discover
+## What I built
 
-some actions need precursor actions before being able to execute them
+A two-pass dependency inference system that maps which Composio API tools must run before other tools can execute, visualized as an interactive D3.js graph.
 
-a concrete example
+### Problem
 
-1. the tool `GMAIL_REPLY_TO_THREAD` which needs a `thread_id`
-2. which can be got by `GMAIL_LIST_THREADS` as an example, there could be other ways to get a `thread_id` too
+When an agent wants to call `GMAIL_REPLY_TO_THREAD`, it needs a `thread_id`. That value can only come from `GMAIL_LIST_THREADS` (or similar). The agent needs to know this dependency upfront — either to fetch it automatically or ask the user for it. This system builds that dependency map across 1304 tools (437 Google Super + 867 GitHub).
 
-a second more dense exmaple
-the send email tool needs an email, if you give a name it should fetch the name from contacts and then you can send the email
+### How it works
 
+**Pass 1 — Schema matching** (`src/infer-deps.ts`: `schemaMatch`)
 
+Deterministic, no API calls. For each tool's required input parameters, checks whether any other tool's output schema produces a matching field name.
 
-when we agentically execute actions inside composio, we need to know either what info to get from the user or what other action we should take before we execute the action.
+Extended with:
+- **Synonym expansion**: `email` ↔ `emailaddress`/`useremail`, `repo` ↔ `repository`, `owner` ↔ `username`/`login`, `sha` ↔ `commitsha`/`ref`, `threadid` ↔ `id` (when context matches), etc. (~40 synonym pairs)
+- **Contextual ID matching**: If a tool's slug contains a domain keyword (e.g., `THREAD`, `ISSUE`, `PULL`) and it outputs a plain `id` field, it gets indexed under the domain-specific key (`threadid`, `issuenumber`, `prnumber`). This catches the very common pattern where list/get tools return `id` but consumers require `thread_id`.
+- Confidence: exact field match = 0.85, synonym/contextual = 0.72
 
-you are supposed to build a dependency graph for this
+Result: **2606 schema-matched edges**
 
-to keep this limited in scope, we expect you to only do it for [Google Super](https://docs.composio.dev/toolkits/googlesuper) and [Github](https://docs.composio.dev/toolkits/github)
+**Pass 2 — LLM inference** (`src/infer-deps.ts`: `llmInferForTool`)
 
-the final submission should be a visualized dependency graph where i can see connection (this is not super important just should exist for me to see if graph with edges and nodes)
+For tools where required params had no schema match, sends the tool description + unsatisfied params to `anthropic/claude-haiku-4.5` via OpenRouter. The LLM uses semantic reasoning and API domain knowledge to infer likely producers.
 
-## get started
+- Concurrency: 8 parallel requests
+- System prompt includes all 1304 known tool slugs so LLM can only reference real tools
+- Confidence capped at 0.85 (lower than schema matches to reflect uncertainty)
+- LLM edges are cached separately so schema can be refreshed independently
 
-1. go to https://platform.composio.dev and get an api key
-2. run `COMPOSIO_API_KEY=PUT_YOUR_KEY_HERE sh scaffold.sh` will give you an **openrouter-key**
-3. check `src/index.ts` to see how to fetch full google raw tools (fastest way to run is https://bun.sh/)
+Result: **278 LLM-inferred edges**
 
-you can implement this with whatever language you want, feel free to use language models and coding tools
+**Total: 2884 dependency edges**
 
-## submit
+### Caching + CLI flags
 
-once you are done use `sh upload.sh <your_email> [--skip-session]`
+```
+bun run src/index.ts              # use cached tools + dependencies
+bun run src/index.ts --no-cache   # re-fetch everything (tools + LLM inference)
+bun run src/index.ts --refresh-schema  # re-run schema matching, keep cached LLM edges
+```
 
-## agent session tracing (required by default)
+### Visualization (`src/visualize.ts`)
 
-- `upload.sh` collects recent local agent sessions into `agent-sessions/` before creating your submission zip.
-- It includes recent activity from this task folder for Codex, Claude Code, OpenCode, and Cursor (90-minute window).
-- If no recent sessions are found, interactive runs prompt you before continuing.
-- Use `--skip-session` only if you explicitly want to upload without session tracing.
+Interactive D3.js arc diagram embedded in `index.html`:
 
-examples:
+- **Arc layout**: Tools arranged in toolkit rings (Google Super inner, GitHub outer), with stable deterministic jitter per node (hash of slug) so layout doesn't jump on filter changes
+- **Node sizing**: Radius scales with degree (in + out edges), capped to prevent overlap
+- **Hub glow**: Top 15 nodes by degree get a color glow — these are the most-connected tools (e.g., tools that many others depend on)
+- **Filters**: By toolkit, by action type (read/write/delete/list/create/other), full-text search, confidence slider
+- **Sidebar**: Click any node to see its precursors (tools it depends on) and consumers (tools that depend on it), with `via` parameter shown for each edge
+- **Tooltip**: Hover any node for description + degree stats
+- **Reset**: One-click filter reset
+- **Legend**: Toolkit color key, action type colors, degree/glow explanation
+- **Accessibility**: `aria-label` on inputs, `role="img"` on SVG, WCAG-compliant contrast
 
-- `sh upload.sh your_email@example.com`
-- `sh upload.sh your_email@example.com --skip-session`
+### Project structure
 
-NOTE:  Feel free to use LLM, you will be judged by the quality of output, eval...
+```
+src/
+  index.ts        — entrypoint, CLI flags
+  fetch-tools.ts  — Composio SDK fetcher, caches per toolkit
+  infer-deps.ts   — two-pass inference (schema + LLM)
+  build-graph.ts  — assembles Graph object with degree counts + positions
+  visualize.ts    — generates self-contained index.html
+  parser.ts       — LLM JSON response parser
+graph.json        — machine-readable dependency graph
+index.html        — interactive visualization (open in browser)
+cache/            — cached tool schemas + dependency edges
+```
+
+## Setup
+
+1. Get a Composio API key from https://platform.composio.dev
+2. Get an OpenRouter API key from https://openrouter.ai (needs credits for LLM pass)
+3. Install [Bun](https://bun.sh): `curl -fsSL https://bun.sh/install | bash`
+4. `bun install`
+5. Set env vars: `COMPOSIO_API_KEY=... OPENROUTER_API_KEY=... bun run src/index.ts`
+
+Or use a `.env` file.
+
+## Submit
+
+```
+sh upload.sh <your_email>
+sh upload.sh <your_email> --skip-session
+```
+
+## Agent session tracing
+
+`upload.sh` collects recent local agent sessions into `agent-sessions/` before creating the submission zip. Includes activity from Codex, Claude Code, OpenCode, and Cursor within a 90-minute window. Use `--skip-session` to skip.
