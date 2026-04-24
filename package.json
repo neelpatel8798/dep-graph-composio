@@ -1,0 +1,12 @@
+{
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.87",
+    "@anthropic-ai/sdk": "^0.91.0",
+    "@composio/core": "^0.6.11",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.10",
+    "@types/bun": "^1.3.11"
+  }
+}
